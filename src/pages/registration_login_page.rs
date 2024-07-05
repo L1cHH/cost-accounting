@@ -4,17 +4,30 @@ pub struct Login {
     password_field: String,
     repeat_password_field: Option<String>,
     registration_error: Option<RegistrationError>,
-    login_error: Option<LoginError>
+    login_error: Option<LoginError>,
+    is_registered: bool
 }
 
 impl Login {
-    pub fn new() -> Self {
+    pub fn new_registration_page() -> Self {
         Self {
             login_field: String::new(),
             password_field: String::new(),
             repeat_password_field: Some(String::new()),
             registration_error: None,
-            login_error: None
+            login_error: None,
+            is_registered: false
+        }
+    }
+
+    pub fn new_login_page() -> Self {
+        Self {
+            login_field: String::new(),
+            password_field: String::new(),
+            repeat_password_field: None,
+            registration_error: None,
+            login_error: None,
+            is_registered: true
         }
     }
 
@@ -50,7 +63,23 @@ impl Login {
         self.registration_error = error
     }
 
-    pub fn verify_password(&mut self) -> bool {
+    pub fn set_login_error(&mut self, error: Option<LoginError>) {
+        self.login_error = error
+    }
+
+    pub fn get_login_error(&self) -> Option<&LoginError> {
+        self.login_error.as_ref()
+    }
+
+    pub fn registered(&mut self) {
+        self.is_registered = true
+    }
+
+    pub fn is_registered(&self) -> bool {
+        if self.is_registered {true} else {false}
+    }
+
+    pub fn check_password(&mut self) -> bool {
         if is_password_relevant(&self.password_field) == false {
             self.registration_error = Some(RegistrationError::IrrelevantPassword);
             return false
@@ -70,7 +99,7 @@ pub enum RegistrationError {
     IrrelevantPassword,
     UserAlreadyExists
 }
-
+#[derive(Clone, Debug)]
 pub enum LoginError {
     WrongPasswordOrLogin
 }
