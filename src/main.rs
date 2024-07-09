@@ -14,6 +14,7 @@ use sqlx::{mysql, MySql, Pool, Row};
 use once_cell::sync::OnceCell;
 use crate::custom_widgets::exit_button_widget::ExitButton;
 use crate::custom_widgets::hyperlink_widget::Hyperlink;
+use crate::custom_widgets::modal_window::Modal;
 use crate::pages::{Page};
 use crate::pages::registration_login_page::{Login, LoginError, RegistrationError, is_password_relevant};
 use crate::user::User;
@@ -62,8 +63,9 @@ pub enum Message {
 
    //NotesPage
    ChangeCategory(NotesCategory),
-   Exit,
-
+   TryToExit,
+   ExitAccepted,
+   ExitNotAccepted
 }
 
 #[derive(Clone, Debug)]
@@ -231,9 +233,20 @@ impl Application for FinanceApp {
 
                },
 
-               Message::Exit => {
+               Message::TryToExit => {
+                  notes_page.show_modal = true;
+                  Command::none()
+               }
+
+               Message::ExitAccepted => {
+                  notes_page.show_modal = false;
                   self.user = None;
                   self.page = Page::LoginPage(Login::new_login_page());
+                  Command::none()
+               }
+
+               Message::ExitNotAccepted => {
+                  notes_page.show_modal = false;
                   Command::none()
                }
 
@@ -398,7 +411,7 @@ impl Application for FinanceApp {
             let incomes_category = Hyperlink::new("Доходы".to_string(), NotesCategory::IncomesState, |category| Message::ChangeCategory(category));
             let expenses_category = Hyperlink::new("Расходы".to_string(), NotesCategory::ExpensesState, |category| Message::ChangeCategory(category));
 
-            let exit_btn = ExitButton::new(active_exit_path, hovered_exit_path, clicked_exit_path, |()| Message::Exit);
+            let exit_btn = ExitButton::new(active_exit_path, hovered_exit_path, clicked_exit_path, |()| Message::TryToExit);
 
             //User SVG
             let user_image = row![
@@ -443,8 +456,27 @@ impl Application for FinanceApp {
                 .padding(Padding::from([20, 0]))
                 .style(iced::theme::Container::Custom(Box::new(CategoryContainer)));
 
+            let final_container = container(row![notes_section, category_section].align_items(Center).spacing(15)).padding(20);
+            let modal_window = container(
+               column![
+                  text("Вы точно хотите выйти?").size(20),
+                  row![
+                     button("Вернуться").padding(5).on_press(Message::ExitNotAccepted),
+                     button("Выйти").padding(5).on_press(Message::ExitAccepted)
+                  ].align_items(Alignment::Center).spacing(15)
+               ].align_items(Center).spacing(15)
+            ).padding(30).style(iced::theme::Container::Custom(Box::new(CategoryContainer)));
 
-            container(row![notes_section, category_section].align_items(Center).spacing(15)).padding(20).into()
+            match notes_page.show_modal {
+               false => {
+                  final_container.into()
+               }
+
+               true => {
+                  Modal::new(final_container, modal_window).on_blur(Message::ExitNotAccepted).into()
+               }
+            }
+
 
          }
       }
