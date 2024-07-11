@@ -2,6 +2,9 @@ pub mod pages;
 mod user;
 mod styles;
 pub mod custom_widgets;
+mod income;
+mod expense;
+mod error;
 
 use std::env;
 use std::env::current_dir;
@@ -10,16 +13,20 @@ use anyhow::{Result};
 use iced::{Application, Command, Element, Renderer, Settings, Theme, Length, Padding, Color, Alignment};
 use iced::Alignment::Center;
 use iced::widget::{container, text, column, text_input, Text, button, row, Svg, Component, Space};
-use sqlx::{mysql, MySql, Pool, Row};
+use sqlx::{mysql, MySql, Pool, Row, Error};
 use once_cell::sync::OnceCell;
 use crate::custom_widgets::exit_button_widget::ExitButton;
 use crate::custom_widgets::hyperlink_widget::Hyperlink;
 use crate::custom_widgets::modal_window::Modal;
+use crate::error::QueryError;
+use crate::expense::Expense;
+use crate::income::Income;
 use crate::pages::{Page};
 use crate::pages::registration_login_page::{Login, LoginError, RegistrationError, is_password_relevant};
 use crate::user::User;
 use crate::pages::notes_page::{Notes, NotesCategory};
-use crate::styles::notes_styling::{CategoryContainer, NotesContainer, TestContainer};
+use crate::pages::notes_page::InputError::IncorrectFormat;
+use crate::styles::notes_styling::{CategoryContainer, CorrectTextInputStyle, ErrorTextInputStyle, NotesContainer, TestContainer};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
@@ -39,6 +46,7 @@ pub struct FinanceApp {
    page: Page,
    user: Option<User>,
    data_base_error: Option<DataBaseError>,
+   query_error: Option<QueryError>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,21 +59,27 @@ pub enum Message {
    RepeatPasswordChanged(String),
 
    //Registration Page
-   TryToCreateUser(Result<bool, DataBaseError>),
-   UserCreated(Result<(), DataBaseError>),
+   TryToCreateUser(Result<bool, QueryError>),
+   UserCreated(Result<(), QueryError>),
    SignUp,
    ToLoginPage,
 
    //Login Page
    ToRegistrationPage,
    LogIn,
-   LoggedIn(Result<User, LoginError>),
+   LoggedIn(Result<User, QueryError>),
 
    //NotesPage
    ChangeCategory(NotesCategory),
    TryToExit,
    ExitAccepted,
-   ExitNotAccepted
+   ExitNotAccepted,
+   ProfileNameChanged(String),
+   ProfileSurnameChanged(String),
+   SaveChangedName,
+   SaveChangedSurname,
+   LoadIncomes(Result<Vec<Income>, QueryError>),
+   LoadExpenses(Result<Vec<Expense>, QueryError>)
 }
 
 #[derive(Clone, Debug)]
@@ -95,7 +109,8 @@ impl Application for FinanceApp {
             Login::new_registration_page()
          ),
          user: None,
-         data_base_error: None
+         data_base_error: None,
+         query_error: None,
       },
       Command::perform(connect_to_db(), Message::ConnectToDB)
       )
@@ -154,17 +169,12 @@ impl Application for FinanceApp {
                         }
                      }
                      Err(error) => {
-                        self.data_base_error = Some(error);
+                        self.query_error = Some(error);
                         println!("Error");
                         Command::none()
                      }
                   }
 
-               }
-
-               Message::UserCreated(Err(err_with_adding)) => {
-                  self.data_base_error = Some(err_with_adding);
-                  Command::none()
                }
 
                Message::UserCreated(Ok(())) => {
@@ -208,12 +218,18 @@ impl Application for FinanceApp {
                   self.page = Page::NotesPage(Notes::new());
 
                   //Need to go on another page and try to load saved incomes and expenses
-                  Command::none()
+                  Command::batch(vec![
+                     Command::perform(load_incomes(POOL.get().unwrap(), self.user.as_ref().unwrap().get_id()), Message::LoadIncomes),
+                     Command::perform(load_expenses(POOL.get().unwrap(), self.user.as_ref().unwrap().get_id()), Message::LoadExpenses)
+                  ])
                },
 
                Message::LoggedIn(Err(err)) => {
-                  login.set_login_error(Some(err));
-                  println!("Cant log in. There are some errors");
+                  if err == QueryError::NoResultFound {
+                     login.set_login_error(Some(LoginError::WrongPasswordOrLogin));
+                     eprintln!("Cant log in. Wrong login or password");
+                  }
+                  eprintln!("Cant log in. There are some errors (not include wrong password-login )");
                   Command::none()
                }
 
@@ -247,6 +263,64 @@ impl Application for FinanceApp {
 
                Message::ExitNotAccepted => {
                   notes_page.show_modal = false;
+                  Command::none()
+               }
+
+               Message::ProfileNameChanged(name) => {
+                  notes_page.profile_name_input = name;
+
+                  match correct_format(notes_page.profile_name_input.as_ref()) {
+                     true => notes_page.name_input_error = None,
+                     false => notes_page.name_input_error = Some(IncorrectFormat)
+                  }
+
+                  Command::none()
+               }
+
+               Message::ProfileSurnameChanged(surname) => {
+                  notes_page.profile_surname_input = surname;
+
+                  match correct_format(notes_page.profile_surname_input.as_ref()) {
+                     true => notes_page.surname_input_error = None,
+                     false => notes_page.surname_input_error = Some(IncorrectFormat)
+                  }
+
+                  Command::none()
+               }
+
+               Message::SaveChangedName => {
+                  match notes_page.name_input_error {
+                     Some(_) => {},
+                     None => {
+                        if notes_page.profile_name_input.len() > 0 {
+                           self.user.as_mut().unwrap().first_name = Some(notes_page.profile_name_input.clone())
+                        }
+                     }
+                  }
+
+                  Command::none()
+               }
+
+               Message::SaveChangedSurname => {
+
+                  match notes_page.surname_input_error {
+                     Some(_) => {},
+                     None => {
+                        if notes_page.profile_surname_input.len() > 0 {
+                           self.user.as_mut().unwrap().last_name = Some(notes_page.profile_surname_input.clone())
+                        }
+                     }
+                  }
+                  Command::none()
+               }
+
+               Message::LoadIncomes(Ok(incomes)) => {
+                  self.user.as_mut().unwrap().add_incomes_to_user(incomes);
+                  Command::none()
+               }
+
+               Message::LoadExpenses(Ok(expenses)) => {
+                  self.user.as_mut().unwrap().add_expenses_to_user(expenses);
                   Command::none()
                }
 
@@ -357,28 +431,125 @@ impl Application for FinanceApp {
             user_svg_path.push("src\\icons\\user.svg");
             let user_svg = Svg::from_path(user_svg_path).height(50);
 
-            //BUTTON VIEW IN ACTIVE MODE
+            //EXIT BUTTON VIEW IN ACTIVE MODE
             let mut active_exit_path = icons_dir.clone();
             active_exit_path.push("src\\icons\\active_exit.svg");
 
-            //BUTTON VIEW IN HOVERED MODE
+            //EXIT BUTTON VIEW IN HOVERED MODE
             let mut hovered_exit_path = icons_dir.clone();
             hovered_exit_path.push("src\\icons\\hovered_exit.svg");
 
-            //BUTTON VIEW IN CLICKED MODE
+            //EXIT BUTTON VIEW IN CLICKED MODE
             let mut clicked_exit_path = icons_dir.clone();
             clicked_exit_path.push("src\\icons\\clicked_exit.svg");
+
+            //ACCEPT BUTTON VIEW IN ACTIVE MODE
+            let mut active_accept_path = icons_dir.clone();
+            active_accept_path.push("src\\icons\\active_accept.svg");
+
+            //ACCEPT BUTTON VIEW IN HOVERED MODE
+            let mut hovered_accept_path = icons_dir.clone();
+            hovered_accept_path.push("src\\icons\\hovered_accept.svg");
+
+            //ACCEPT BUTTON VIEW IN CLICKED MODE
+            let mut clicked_accept_path = icons_dir.clone();
+            clicked_accept_path.push("src\\icons\\clicked_accept.svg");
 
             let notes_section = match notes_page.current_category{
 
                NotesCategory::MyProfile => {
-                  let profile_text = text("Here will be info about me..").size(20);
+                  let user = self.user.as_ref().unwrap();
+
+                  let person_name = match user.first_name.as_ref() {
+                     Some(name) => text(format!("{name}")).size(20),
+                     None => text("Неизвестно").size(20)
+                  };
+
+                  let person_last_name = match user.last_name.as_ref() {
+                     Some(last_name) => text(format!("{last_name}")).size(20),
+                     None => text("Неизвестно").size(20)
+                  };
+
+                  let person_login = &user.nickname;
+
+                  let welcome_section = row![
+                     Space::with_width(Length::FillPortion(2)),
+                     text("Ваш профиль").size(20).width(Length::FillPortion(1)),
+                     Space::with_width(Length::FillPortion(2))
+                  ];
 
 
-                  container(profile_text)
-                      .center_x()
+                  let name_section = row![
+                     Space::with_width(Length::FillPortion(1)),
+                     person_last_name.clone().width(Length::FillPortion(2)),
+                     person_name.clone().width(Length::FillPortion(2)),
+                     Space::with_width(Length::FillPortion(12)),
+                  ];
+
+                  let login_section = row![
+                     Space::with_width(Length::FillPortion(1)),
+                     text(person_login).width(Length::FillPortion(3)),
+                     Space::with_width(Length::FillPortion(6)),
+                  ];
+
+                  let edit_section = row![
+                     Space::with_width(Length::FillPortion(2)),
+                     text("Редактировать").size(20).width(Length::FillPortion(1)),
+                     Space::with_width(Length::FillPortion(2))
+                  ];
+
+                  let edit_name = row![
+                     Space::with_width(Length::FillPortion(1)),
+                     text("Ваше Имя:").width(Length::FillPortion(1)),
+                     person_name.width(Length::FillPortion(1)),
+                     Space::with_width(Length::FillPortion(1)),
+                     text("Новое Имя:").width(Length::FillPortion(1)),
+                     text_input("Имя", &notes_page.profile_name_input)
+                        .style(iced::theme::TextInput::Custom(
+                        match notes_page.name_input_error.as_ref() {
+                           Some(_) => {
+                              Box::new(ErrorTextInputStyle)
+                           },
+                           None => {
+                              Box::new(CorrectTextInputStyle)
+                           }
+                        })).on_input(Message::ProfileNameChanged),
+                     container(ExitButton::new(active_accept_path.clone(), hovered_accept_path.clone(), clicked_accept_path.clone(), |()| Message::SaveChangedName)).width(Length::FillPortion(1)),
+                     Space::with_width(Length::FillPortion(1)),
+                  ].align_items(Center);
+
+                  let edit_surname = row![
+                     Space::with_width(Length::FillPortion(1)),
+                     text("Ваша Фамилия:").width(Length::FillPortion(1)),
+                     person_last_name.width(Length::FillPortion(1)),
+                     Space::with_width(Length::FillPortion(1)),
+                     text("Новая Фамилия:").width(Length::FillPortion(1)),
+                     text_input("Фамилия", &notes_page.profile_surname_input).style(iced::theme::TextInput::Custom(
+                        match notes_page.surname_input_error.as_ref() {
+                           Some(_) => {
+                              Box::new(ErrorTextInputStyle)
+                           },
+                           None => {
+                              Box::new(CorrectTextInputStyle)
+                           }
+                        })).on_input(Message::ProfileSurnameChanged),
+                     container(ExitButton::new(active_accept_path, hovered_accept_path, clicked_accept_path, |()| Message::SaveChangedSurname)).width(Length::FillPortion(1)),
+                     Space::with_width(Length::FillPortion(1)),
+                  ].align_items(Center);
+
+
+
+                  container(column![
+                     welcome_section.padding(Padding::from([0, 0, 40, 0])),
+                     name_section.padding(Padding::from([0, 0, 35, 0])),
+                     login_section.padding(Padding::from([0, 0, 90, 0])),
+                     edit_section.padding(Padding::from([0, 0, 30, 0])),
+                     edit_name.padding(Padding::from([0, 0, 10, 0])),
+                     edit_surname,
+                  ])
                       .width(Length::FillPortion(4))
                       .height(Length::Fill)
+                      .padding(Padding::from([50, 0]))
                       .style(iced::theme::Container::Custom(Box::new(NotesContainer)))
                }
 
@@ -426,7 +597,7 @@ impl Application for FinanceApp {
                container(my_profile_category).width(Length::FillPortion(2)).padding(Padding::from([0, 20, 0, 0])),
                container(exit_btn).width(Length::FillPortion(2)),
                Space::with_width(Length::FillPortion(1))
-            ].align_items(Center).padding(Padding::from([0, 0, 40, 0]));
+            ].align_items(Center).spacing(10).padding(Padding::from([0, 0, 40, 0]));
 
             //TEXT "РАЗДЕЛ"
             let choice_text = row![
@@ -483,6 +654,10 @@ impl Application for FinanceApp {
    }
 }
 
+fn correct_format(input: &str) -> bool {
+   input.chars().all(|c| (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') && (input.len() > 0))
+}
+
 
 async fn connect_to_db() -> Result<Pool<MySql>, DataBaseError> {
    let pool = mysql::MySqlPool::connect(&env::var("DATABASE_URL").expect("Need to set env. variable 'DATABASE_URL'..."))
@@ -490,7 +665,7 @@ async fn connect_to_db() -> Result<Pool<MySql>, DataBaseError> {
        .map_err(|_| DataBaseError::DataBaseConnectionErr)?;
    Ok(pool)
 }
-async fn is_user_exists(pool: &Pool<MySql>, login: String) -> Result<bool, DataBaseError> {
+async fn is_user_exists(pool: &Pool<MySql>, login: String) -> Result<bool, QueryError> {
    let user = sqlx::query(
       r#"
       SELECT Count(user_id) as count from Пользователь
@@ -498,8 +673,8 @@ async fn is_user_exists(pool: &Pool<MySql>, login: String) -> Result<bool, DataB
       "#
    ).bind(login).fetch_one(pool)
        .await
-       .map_err(|_| {
-          DataBaseError::GetUserErr
+       .map_err(|err| {
+          QueryError::match_sqlx_error(err)
        })?;
 
    let users_count: i32 = user.get("count");
@@ -514,22 +689,24 @@ async fn is_user_exists(pool: &Pool<MySql>, login: String) -> Result<bool, DataB
    }
 
 }
-async fn add_user(pool: &Pool<MySql>, login: String, password: String) -> Result<(), DataBaseError> {
-   let user = sqlx::query(&format!(
+async fn add_user(pool: &Pool<MySql>, login: String, password: String) -> Result<(), QueryError> {
+   let user_id = sqlx::query(&format!(
       r#"
       INSERT INTO ПОЛЬЗОВАТЕЛЬ (NICKNAME, PASSWORD)
       VALUES ('{login}', '{password}')
       "#
    )).execute(pool)
        .await
-       .map_err(|_| DataBaseError::CreateUserErr)?
+       .map_err(|err| {
+          QueryError::match_sqlx_error(err)
+       })?
        .last_insert_id();
 
-   println!("{}", format!("User was added. ID: {user}"));
+   println!("{}", format!("User was added. ID: {user_id}"));
 
    Ok(())
 }
-async fn log_in(pool: &Pool<MySql>, login: String, password: String) -> Result<User, LoginError> {
+async fn log_in(pool: &Pool<MySql>, login: String, password: String) -> Result<User, QueryError> {
    let user = sqlx::query(
       r#"
       SELECT user_id, last_name, first_name, nickname from Пользователь
@@ -537,9 +714,8 @@ async fn log_in(pool: &Pool<MySql>, login: String, password: String) -> Result<U
       "#
    ).bind(login).bind(password).fetch_one(pool)
        .await
-       .map_err(|e| {
-          println!("{e}");
-          LoginError::WrongPasswordOrLogin
+       .map_err(|err| {
+          QueryError::match_sqlx_error(err)
        })?;
 
    let user_id: i32 = user.get("user_id");
@@ -549,4 +725,37 @@ async fn log_in(pool: &Pool<MySql>, login: String, password: String) -> Result<U
 
    Ok(User::new(user_id, last_name, first_name, nickname))
 }
+async fn load_incomes(pool: &Pool<MySql>, users_id: i32) -> Result<Vec<Income>, QueryError> {
+   let incomes = sqlx::query(
+      r#"
+      SELECT * FROM ДОХОД
+      WHERE INCOMES_CREATOR = ( ? )
+      "#
+   )
+       .bind(users_id)
+       .fetch_all(pool)
+       .await
+       .map_err(|err| {
+          QueryError::match_sqlx_error(err)
+       })?;
+
+   Ok(Income::collect_from_query_vec(incomes))
+}
+async fn load_expenses(pool: &Pool<MySql>, users_ud: i32) -> Result<Vec<Expense>, QueryError> {
+   let expenses = sqlx::query(
+      r#"
+      SELECT * FROM РАСХОД
+      WHERE EXPENSES_CREATOR = ( ? )
+      "#
+   )
+       .bind(users_ud)
+       .fetch_all(pool)
+       .await
+       .map_err(|err| {
+          QueryError::match_sqlx_error(err)
+       })?;
+
+   Ok(Expense::collect_from_query_vec(expenses))
+}
+
 

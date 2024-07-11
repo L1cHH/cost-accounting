@@ -11,7 +11,7 @@ dotenv = "0.15.0"
 iced = { version = "0.12.1", features = ["tokio", "image", "svg", "lazy", "advanced"] }
 lazy_static = "1.5.0"
 once_cell = "1.19.0"
-sqlx = { version = "0.7.4", features = ["mysql", "runtime-tokio-native-tls", "macros"] }
+sqlx = { version = "0.7.4", features = ["mysql", "runtime-tokio-native-tls", "macros", "time"] }
 tokio = { version = "1.38.0", features = ["rt", "rt-multi-thread", "macros"] }
 tokio-macros = "2.2.0"
 log = "0.4.21"
